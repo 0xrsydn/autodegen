@@ -1,5 +1,5 @@
 data/
+results.tsv
 __pycache__/
 .venv/
-results.tsv
 .pytest_cache/
