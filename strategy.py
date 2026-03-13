@@ -9,10 +9,10 @@ from prepare import evaluate, load_bars
 
 
 class Strategy:
-    name = "ema_crossover_v1"
+    name = "ema_crossover_8_21"
     parameters = {
-        "fast_period": 12,
-        "slow_period": 26,
+        "fast_period": 8,
+        "slow_period": 21,
         "size": 0.25,
     }
 
@@ -21,7 +21,6 @@ class Strategy:
         self.slow_ema = None
         self.prev_fast_ema = None
         self.prev_slow_ema = None
-        self.warmup = 0
         self.prices = deque(maxlen=max(self.parameters["fast_period"], self.parameters["slow_period"]))
 
     def _ema(self, prev, price, period):
