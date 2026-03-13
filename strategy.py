@@ -9,10 +9,10 @@ from prepare import evaluate, load_bars
 
 
 class Strategy:
-    name = "ema_crossover_8_21"
+    name = "ema_crossover_6_34"
     parameters = {
-        "fast_period": 8,
-        "slow_period": 21,
+        "fast_period": 6,
+        "slow_period": 34,
         "size": 0.25,
     }
 
