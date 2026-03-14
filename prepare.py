@@ -4,7 +4,6 @@ import argparse
 import csv
 import math
 import time
-import warnings
 from collections import namedtuple
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -18,6 +17,14 @@ Bar = namedtuple("Bar", ["timestamp", "open", "high", "low", "close", "volume"])
 REQUIRED_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
 EPS = 1e-12
 HOURS_PER_YEAR = 8760
+CANONICAL_EXCHANGE = "binance"
+CANONICAL_PAIR = "BTC/USDT:USDT"
+CANONICAL_TIMEFRAME = "1h"
+CANONICAL_START = datetime(2020, 1, 1, tzinfo=UTC)
+FRESHNESS_TOLERANCE = timedelta(hours=48)
+TARGET_TRAIN_HOURS = 180 * 24
+TARGET_TEST_HOURS = 45 * 24
+MIN_VALIDATION_HOURS = 90 * 24
 
 
 class DataQualityError(ValueError):
@@ -32,6 +39,19 @@ class BacktestResult:
     cash: float
     position: float
     days_elapsed: float
+
+
+@dataclass
+class DatasetSummary:
+    exchange: str
+    pair: str
+    timeframe: str
+    first_bar: datetime | None
+    last_bar: datetime | None
+    bar_count: int
+    total_days: float
+    required_bars: int
+    full_wf_ready: bool
 
 
 def validate_ohlcv(df: pl.DataFrame) -> None:
@@ -67,46 +87,187 @@ def _target_dir(data_dir: str, exchange: str, pair: str) -> Path:
     return Path(data_dir) / exchange / pair.replace("/", "-").replace(":", "-")
 
 
-def _load_latest_timestamp(target: Path) -> int | None:
+def _normalize_pair(exchange: str, pair: str) -> str:
+    if exchange == CANONICAL_EXCHANGE and pair == "BTC/USDT":
+        return CANONICAL_PAIR
+    return pair
+
+
+def _as_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _parse_start(start: str | None) -> datetime:
+    if start is None:
+        return CANONICAL_START
+    cleaned = start.strip().replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(cleaned)
+    return _as_utc(parsed)
+
+
+def _required_total_bars(n_folds: int = 6, validation_pct: float = 0.15) -> int:
+    wf_hours = TARGET_TRAIN_HOURS + (n_folds * TARGET_TEST_HOURS)
+    return math.ceil(wf_hours / (1.0 - validation_pct))
+
+
+def _load_time_bounds(target: Path) -> tuple[datetime | None, datetime | None]:
     files = sorted(target.glob("*.parquet"))
     if not files:
-        return None
+        return None, None
 
+    earliest_ts: datetime | None = None
     latest_ts: datetime | None = None
     for file in files:
         part = pl.read_parquet(file).select("timestamp").sort("timestamp")
         if len(part) == 0:
             continue
+        first_ts = part["timestamp"][0]
         ts = part["timestamp"][-1]
+        if earliest_ts is None or first_ts < earliest_ts:
+            earliest_ts = first_ts
         if latest_ts is None or ts > latest_ts:
             latest_ts = ts
 
-    if latest_ts is None:
-        return None
-    return int(latest_ts.timestamp() * 1000) + 1
+    return earliest_ts, latest_ts
+
+
+def load_ohlcv(
+    data_dir: str = "data",
+    exchange: str = CANONICAL_EXCHANGE,
+    pair: str = CANONICAL_PAIR,
+) -> pl.DataFrame:
+    pair = _normalize_pair(exchange, pair)
+    target = _target_dir(data_dir, exchange, pair)
+    files = sorted(target.glob("*.parquet"))
+    if not files:
+        return pl.DataFrame({c: [] for c in REQUIRED_COLUMNS})
+
+    df = pl.concat([pl.read_parquet(f) for f in files]).sort("timestamp").unique(subset=["timestamp"], keep="last")
+    validate_ohlcv(df)
+    return df.select(REQUIRED_COLUMNS)
+
+
+def summarize_dataset(
+    data_dir: str = "data",
+    exchange: str = CANONICAL_EXCHANGE,
+    pair: str = CANONICAL_PAIR,
+    timeframe: str = CANONICAL_TIMEFRAME,
+    n_folds: int = 6,
+    validation_pct: float = 0.15,
+) -> DatasetSummary:
+    if timeframe != CANONICAL_TIMEFRAME:
+        raise DataQualityError(f"unsupported timeframe for benchmark validation: {timeframe}")
+
+    pair = _normalize_pair(exchange, pair)
+    df = load_ohlcv(data_dir=data_dir, exchange=exchange, pair=pair)
+    timestamps = df["timestamp"].to_list() if len(df) > 0 else []
+
+    for prev, curr in zip(timestamps, timestamps[1:]):
+        delta = curr - prev
+        if delta != timedelta(hours=1):
+            raise DataQualityError(
+                f"timestamp gap detected: {_as_utc(prev).isoformat()} -> {_as_utc(curr).isoformat()} ({delta.total_seconds() / 3600:.1f}h)"
+            )
+
+    first_bar = _as_utc(timestamps[0]) if timestamps else None
+    last_bar = _as_utc(timestamps[-1]) if timestamps else None
+    bar_count = len(df)
+    required_bars = _required_total_bars(n_folds=n_folds, validation_pct=validation_pct)
+
+    return DatasetSummary(
+        exchange=exchange,
+        pair=pair,
+        timeframe=timeframe,
+        first_bar=first_bar,
+        last_bar=last_bar,
+        bar_count=bar_count,
+        total_days=bar_count / 24.0,
+        required_bars=required_bars,
+        full_wf_ready=bar_count >= required_bars,
+    )
+
+
+def print_dataset_summary(summary: DatasetSummary) -> None:
+    first_bar = summary.first_bar.isoformat() if summary.first_bar else "NONE"
+    last_bar = summary.last_bar.isoformat() if summary.last_bar else "NONE"
+    print(f"dataset_exchange={summary.exchange}")
+    print(f"dataset_pair={summary.pair}")
+    print(f"dataset_timeframe={summary.timeframe}")
+    print(f"dataset_first_bar={first_bar}")
+    print(f"dataset_last_bar={last_bar}")
+    print(f"dataset_bars={summary.bar_count}")
+    print(f"dataset_days={summary.total_days:.1f}")
+    print(f"dataset_required_bars={summary.required_bars}")
+    print(f"dataset_full_wf_ready={'PASS' if summary.full_wf_ready else 'FAIL'}")
+
+
+def validate_dataset(
+    data_dir: str = "data",
+    exchange: str = CANONICAL_EXCHANGE,
+    pair: str = CANONICAL_PAIR,
+    timeframe: str = CANONICAL_TIMEFRAME,
+    start: datetime = CANONICAL_START,
+    freshness_tolerance: timedelta = FRESHNESS_TOLERANCE,
+    n_folds: int = 6,
+    validation_pct: float = 0.15,
+) -> DatasetSummary:
+    summary = summarize_dataset(
+        data_dir=data_dir,
+        exchange=exchange,
+        pair=pair,
+        timeframe=timeframe,
+        n_folds=n_folds,
+        validation_pct=validation_pct,
+    )
+
+    if summary.bar_count == 0:
+        raise DataQualityError(f"no local data found for {summary.exchange} {summary.pair} in {data_dir}")
+    if summary.first_bar is None or summary.first_bar > start:
+        actual = summary.first_bar.isoformat() if summary.first_bar else "NONE"
+        raise DataQualityError(f"dataset starts too late: expected <= {start.isoformat()}, got {actual}")
+    if not summary.full_wf_ready:
+        raise DataQualityError(
+            f"insufficient history for canonical walk-forward: need >= {summary.required_bars} bars, got {summary.bar_count}"
+        )
+    if summary.last_bar is None:
+        raise DataQualityError("dataset is missing a last timestamp")
+    if datetime.now(UTC) - summary.last_bar > freshness_tolerance:
+        raise DataQualityError(
+            f"dataset is stale: last bar {summary.last_bar.isoformat()} is older than {freshness_tolerance}"
+        )
+
+    return summary
 
 
 def fetch_data(
-    exchange: str = "binance",
-    pair: str = "BTC/USDT:USDT",
-    timeframe: str = "1h",
+    exchange: str = CANONICAL_EXCHANGE,
+    pair: str = CANONICAL_PAIR,
+    timeframe: str = CANONICAL_TIMEFRAME,
     data_dir: str = "data",
+    start: str | None = None,
 ) -> list[Path]:
     """Fetch OHLCV data via ccxt with since-based pagination; writes monthly parquet files."""
-    if exchange == "binance" and pair == "BTC/USDT":
-        pair = "BTC/USDT:USDT"
+    pair = _normalize_pair(exchange, pair)
+    start_dt = _parse_start(start)
 
     ex = getattr(ccxt, exchange)({"enableRateLimit": True})
     target = _target_dir(data_dir, exchange, pair)
     target.mkdir(parents=True, exist_ok=True)
 
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
-    three_years_ago_ms = int((datetime.now(UTC) - timedelta(days=365 * 3 + 2)).timestamp() * 1000)
-    since_ms = _load_latest_timestamp(target) or three_years_ago_ms
+    earliest_ts, latest_ts = _load_time_bounds(target)
+    if latest_ts is None:
+        since_ms = int(start_dt.timestamp() * 1000)
+    elif earliest_ts is None or _as_utc(earliest_ts) > start_dt:
+        since_ms = int(start_dt.timestamp() * 1000)
+    else:
+        since_ms = int(_as_utc(latest_ts).timestamp() * 1000) + 1
 
     all_rows: list[list[float | int]] = []
     limit = 1000
-    step_ms = 3600 * 1000
+    step_ms = ccxt.Exchange.parse_timeframe(timeframe) * 1000
 
     while True:
         rows = ex.fetch_ohlcv(pair, timeframe=timeframe, since=since_ms, limit=limit)
@@ -159,14 +320,12 @@ def fetch_data(
     return sorted(out_paths)
 
 
-def load_bars(data_dir: str = "data", exchange: str = "binance", pair: str = "BTC/USDT:USDT") -> list[Bar]:
-    target = _target_dir(data_dir, exchange, pair)
-    files = sorted(target.glob("*.parquet"))
-    if not files:
-        return []
-
-    df = pl.concat([pl.read_parquet(f) for f in files]).sort("timestamp").unique(subset=["timestamp"], keep="last")
-    validate_ohlcv(df)
+def load_bars(
+    data_dir: str = "data",
+    exchange: str = CANONICAL_EXCHANGE,
+    pair: str = CANONICAL_PAIR,
+) -> list[Bar]:
+    df = load_ohlcv(data_dir=data_dir, exchange=exchange, pair=pair)
     return [Bar(*row) for row in df.select(REQUIRED_COLUMNS).iter_rows()]
 
 
@@ -398,21 +557,17 @@ def walk_forward_splits(bars: list[Bar], n_folds: int = 6) -> list[tuple[list[Ba
     if len(bars) < n_folds + 2:
         return []
 
-    target_train = 180 * 24
-    target_test = 45 * 24
+    target_train = TARGET_TRAIN_HOURS
+    target_test = TARGET_TEST_HOURS
     target_total = target_train + (n_folds * target_test)
 
-    if len(bars) >= target_total:
-        train_size = target_train
-        test_size = target_test
-    else:
-        scale = len(bars) / target_total
-        train_size = max(24, int(target_train * scale))
-        test_size = max(12, int(target_test * scale))
-        warnings.warn(
-            f"Insufficient history for ideal 180d/45d WF. Scaled to train={train_size/24:.1f}d, test={test_size/24:.1f}d",
-            RuntimeWarning,
+    if len(bars) < target_total:
+        raise DataQualityError(
+            f"insufficient walk-forward history: need {target_total} bars ({target_total / 24:.1f}d), got {len(bars)} bars ({len(bars) / 24:.1f}d)"
         )
+
+    train_size = target_train
+    test_size = target_test
 
     splits: list[tuple[list[Bar], list[Bar]]] = []
     for i in range(n_folds):
@@ -476,14 +631,14 @@ def _append_result_row(path: Path, row: dict[str, str]) -> None:
 
 def evaluate(strategy_cls, bars: list[Bar], n_folds: int = 6, validation_pct: float = 0.15):
     if len(bars) < 100:
-        bars = synthetic_bars(500)
+        raise DataQualityError("not enough real bars for evaluation")
 
     cut = int(len(bars) * (1 - validation_pct))
     wf_bars = bars[:cut]
     val_bars = bars[cut:]
 
-    if len(val_bars) < 90 * 24:
-        warnings.warn(f"Validation segment shorter than 90 days ({len(val_bars)/24:.1f}d)", RuntimeWarning)
+    if len(val_bars) < MIN_VALIDATION_HOURS:
+        raise DataQualityError(f"validation segment shorter than 90 days ({len(val_bars) / 24:.1f}d)")
 
     folds = walk_forward_splits(wf_bars, n_folds=n_folds)
 
@@ -619,22 +774,42 @@ if __name__ == "__main__":
     sub = parser.add_subparsers(dest="cmd")
 
     fetch_p = sub.add_parser("fetch")
-    fetch_p.add_argument("--exchange", default="binance")
-    fetch_p.add_argument("--pair", default="BTC/USDT:USDT")
-    fetch_p.add_argument("--timeframe", default="1h")
+    fetch_p.add_argument("--exchange", default=CANONICAL_EXCHANGE)
+    fetch_p.add_argument("--pair", default=CANONICAL_PAIR)
+    fetch_p.add_argument("--timeframe", default=CANONICAL_TIMEFRAME)
+    fetch_p.add_argument("--start", default=CANONICAL_START.isoformat())
 
-    sub.add_parser("eval")
+    validate_p = sub.add_parser("validate")
+    validate_p.add_argument("--exchange", default=CANONICAL_EXCHANGE)
+    validate_p.add_argument("--pair", default=CANONICAL_PAIR)
+    validate_p.add_argument("--timeframe", default=CANONICAL_TIMEFRAME)
+
+    eval_p = sub.add_parser("eval")
+    eval_p.add_argument("--exchange", default=CANONICAL_EXCHANGE)
+    eval_p.add_argument("--pair", default=CANONICAL_PAIR)
+    eval_p.add_argument("--timeframe", default=CANONICAL_TIMEFRAME)
 
     args = parser.parse_args()
-    if args.cmd == "fetch":
-        paths = fetch_data(args.exchange, args.pair, args.timeframe)
-        print(f"wrote {len(paths)} parquet file(s)")
-        for p in paths:
-            print(p)
-    elif args.cmd == "eval":
-        from strategy import Strategy
+    try:
+        if args.cmd == "fetch":
+            paths = fetch_data(args.exchange, args.pair, args.timeframe, start=args.start)
+            print(f"wrote {len(paths)} parquet file(s)")
+            for p in paths:
+                print(p)
+        elif args.cmd == "validate":
+            summary = validate_dataset(exchange=args.exchange, pair=args.pair, timeframe=args.timeframe)
+            print_dataset_summary(summary)
+            print("dataset_validation=PASS")
+        elif args.cmd == "eval":
+            summary = validate_dataset(exchange=args.exchange, pair=args.pair, timeframe=args.timeframe)
+            print_dataset_summary(summary)
+            from strategy import Strategy
 
-        bars = load_bars()
-        evaluate(Strategy, bars)
-    else:
-        parser.print_help()
+            bars = load_bars(exchange=args.exchange, pair=args.pair)
+            evaluate(Strategy, bars)
+        else:
+            parser.print_help()
+    except DataQualityError as exc:
+        print(f"dataset_validation=FAIL")
+        print(f"error={exc}")
+        raise SystemExit(1) from exc
