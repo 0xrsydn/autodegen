@@ -586,6 +586,7 @@ def _clip(x: float, lo: float, hi: float) -> float:
 
 def composite_score(
     wf_bar_sharpe: float,
+    val_bar_sharpe: float,
     wf_sortino: float,
     wf_calmar: float,
     wf_profit_factor: float,
@@ -593,12 +594,13 @@ def composite_score(
     holdout_decay: float,
 ) -> float:
     return (
-        0.40 * _clip(wf_bar_sharpe / 3.0, 0.0, 1.0)
+        0.35 * _clip(wf_bar_sharpe / 3.0, 0.0, 1.0)
+        + 0.10 * _clip(val_bar_sharpe / 2.0, 0.0, 1.0)
         + 0.15 * _clip(wf_sortino / 5.0, 0.0, 1.0)
         + 0.15 * _clip(wf_calmar / 3.0, 0.0, 1.0)
         + 0.10 * _clip((wf_profit_factor - 1.0) / 2.0, 0.0, 1.0)
         + 0.10 * (1.0 - negative_fold_ratio)
-        + 0.10 * min(holdout_decay, 1.0)
+        + 0.05 * min(holdout_decay, 1.0)
     )
 
 
@@ -666,7 +668,7 @@ def evaluate(strategy_cls, bars: list[Bar], n_folds: int = 6, validation_pct: fl
     test_sharpes = [m["bar_sharpe"] for m in test_metrics]
     train_sharpes = [m["bar_sharpe"] for m in train_metrics]
     holdout_decay = val["bar_sharpe"] / max(wf_bar_sharpe, EPS)
-    train_test_gap = fmean((tr - te) for tr, te in zip(train_sharpes, test_sharpes)) if test_sharpes else 0.0
+    fold_regime_gap = fmean((tr - te) for tr, te in zip(train_sharpes, test_sharpes)) if test_sharpes else 0.0
     fold_std = (pl.Series(test_sharpes).std(ddof=1) if len(test_sharpes) > 1 else 0.0) or 0.0
     negative_fold_ratio = (sum(1 for s in test_sharpes if s < 0) / len(test_sharpes)) if test_sharpes else 1.0
 
@@ -681,7 +683,7 @@ def evaluate(strategy_cls, bars: list[Bar], n_folds: int = 6, validation_pct: fl
             worst_fold_maxdd <= 0.35,
             wf_profit_factor >= 1.10,
             holdout_decay >= 0.50,
-            train_test_gap <= 0.75,
+            fold_regime_gap <= 0.75,
             fold_std <= 1.25,
             negative_fold_ratio <= 0.30,
         ]
@@ -689,6 +691,7 @@ def evaluate(strategy_cls, bars: list[Bar], n_folds: int = 6, validation_pct: fl
 
     composite = composite_score(
         wf_bar_sharpe=wf_bar_sharpe,
+        val_bar_sharpe=val["bar_sharpe"],
         wf_sortino=wf_sortino,
         wf_calmar=wf_calmar,
         wf_profit_factor=wf_profit_factor,
@@ -704,7 +707,7 @@ def evaluate(strategy_cls, bars: list[Bar], n_folds: int = 6, validation_pct: fl
         "bar_sharpe_wf": wf_bar_sharpe,
         "bar_sharpe_val": val["bar_sharpe"],
         "decay": holdout_decay,
-        "train_test_gap": train_test_gap,
+        "fold_regime_gap": fold_regime_gap,
         "fold_std": fold_std,
         "negative_fold_ratio": negative_fold_ratio,
         "maxdd_wf": wf_maxdd,
@@ -726,7 +729,7 @@ def evaluate(strategy_cls, bars: list[Bar], n_folds: int = 6, validation_pct: fl
         "bar_sharpe_wf",
         "bar_sharpe_val",
         "decay",
-        "train_test_gap",
+        "fold_regime_gap",
         "fold_std",
         "negative_fold_ratio",
         "maxdd_wf",
