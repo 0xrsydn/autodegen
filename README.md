@@ -9,8 +9,8 @@ Minimal autoresearch-style trading research loop.
 
 ## Usage
 ```bash
-uv run python prepare.py fetch --exchange hyperliquid --pair BTC/USDT --timeframe 1h
+uv run python prepare.py fetch --exchange binance --pair BTC/USDT:USDT --timeframe 1h --start 2020-01-01T00:00:00Z
+uv run python prepare.py validate --exchange binance --pair BTC/USDT:USDT --timeframe 1h
 uv run python prepare.py eval
 uv run python strategy.py
-uv run pytest tests/ -v
 ```
