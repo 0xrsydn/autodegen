@@ -147,6 +147,55 @@ Creative and degenerate ideas are allowed if they remain:
 - parameter-light,
 - implementable from 1h bars only.
 
+## Strategy families to explore
+
+Go beyond retail TA. These are all implementable from 1h OHLCV, long-only, ≤12 params:
+
+### Regime detection
+- **Volatility regime switching**: rolling vol percentile → trade only in favorable regimes (low-vol-to-high-vol transitions)
+- **Hurst exponent**: rolling estimate of H. H>0.5 = trending (go long with trend), H<0.5 = mean-reverting (fade extremes). Adapt strategy to measured regime.
+- **Market efficiency ratio** (fractal efficiency): sum(abs(bar returns)) / abs(total return) over N bars. Low ratio = clean trend, high ratio = noise. Enter only when trend is "efficient."
+- **Variance ratio test**: compare var(k-period returns) vs k*var(1-period returns). Detects whether returns are random walk vs persistent/trending.
+
+### Microstructure from OHLCV (bar internals)
+- **Shadow/wick ratio**: upper_shadow / range → measures rejection. High upper shadow after uptrend = exhaustion signal (tighten stop or skip entry).
+- **Body/range ratio**: abs(close-open) / (high-low) → conviction. High body ratio = strong conviction bar. Enter after high-conviction bars in trend direction.
+- **Bar compression detector**: rolling range percentile. Extremely narrow bars → volatility expansion is coming. Enter on the breakout from compression.
+- **Volume anomaly z-score**: (volume - rolling_mean) / rolling_std. Spikes = information arrival. Trade with the direction of the anomaly bar.
+
+### Calendar and seasonality
+- **Hour-of-day filter**: BTC has known intraday patterns (Asian session lull, US session volatility). Only enter during historically favorable hours.
+- **Day-of-week momentum**: crypto has weekend vs weekday behavioral differences. Filter entries by day-of-week performance.
+- **Session transition signals**: the first few bars after major session opens (8:00 UTC London, 13:30 UTC NYSE) often set direction.
+
+### Statistical and information-theoretic
+- **Autocorrelation of returns**: rolling autocorrelation at lag-1 through lag-N. Positive autocorrelation = persistence (ride momentum). Negative = mean-revert.
+- **Entropy of returns**: Shannon entropy of binned return distribution over rolling window. Low entropy = predictable regime → trade. High entropy = chaos → sit out.
+- **Jump detection**: z-score of bar returns > threshold → fat tail event. Trade the aftermath (post-jump continuation or reversal patterns).
+- **Consecutive bar counting**: N consecutive green bars → measure conditional probability of continuation. Simple but surprisingly effective as a filter.
+
+### Asymmetric and structural
+- **Up/down momentum asymmetry**: BTC pumps and dumps have different velocity profiles. Measure upside vs downside momentum separately and exploit the asymmetry.
+- **Realized vol vs ATR divergence**: when realized vol (from close-to-close) diverges from ATR (from high-low), it signals hidden directional energy.
+- **Volume-weighted price deviation**: construct rolling VWAP from 1h bars. Trade mean reversion to VWAP in trends (pullback entry).
+- **Multi-timeframe synthesis**: derive 4h and daily signals from 1h bars (e.g., 4-bar or 24-bar aggregated patterns) for higher-timeframe confirmation.
+
+### Exotic and degen
+- **Kelly criterion dynamic sizing**: adjust position size based on rolling Sharpe estimate. Not just entry/exit — sizing IS the edge.
+- **Anti-herding (euphoria filter)**: massive green candles with high volume = retail euphoria. Trail tighter or skip new entries after euphoria bars.
+- **Volatility of volatility**: rolling std of rolling vol. Vol-of-vol spikes precede regime changes. Use as entry/exit timing.
+- **Acceleration (second derivative)**: rate of change of rate of change. Momentum acceleration = early trend, deceleration = late trend. Enter on acceleration, exit on deceleration.
+- **Range expansion ratio**: today's range vs N-day average range. Extreme expansion after contraction = trend initiation signal.
+
+### Combining families
+The strongest strategies may combine one entry signal family with one filter family:
+- Trend entry (EMA cross) + regime filter (Hurst or vol regime) 
+- Momentum entry (ROC) + microstructure filter (body ratio or volume anomaly)
+- Breakout entry (compression) + calendar filter (session hours)
+- Statistical entry (autocorrelation) + asymmetric exit (up/down trail stops)
+
+Keep combinations to 2 families max. More = overfitting.
+
 Avoid local search traps:
 - do not spend many iterations only nudging thresholds or lookbacks,
 - if several experiments fail in the same family, pivot to a different family,
