@@ -3,3 +3,7 @@ results.tsv
 __pycache__/
 .venv/
 .pytest_cache/
+
+# local agent harness
+AGENTS.md
+CLAUDE.md
