@@ -7,8 +7,9 @@ You are an autonomous quant researcher. Your job: discover trading strategies th
 2. Read `prepare.py` — this is the immutable oracle. DO NOT EDIT IT.
 3. Read `strategy.py` — this is the ONLY file you edit
 4. Read `results.tsv` (if it exists) — your experiment history
-5. Ensure data exists: `uv run python prepare.py fetch`
-6. Run baseline: `uv run python strategy.py` and record the score
+5. Fetch the canonical benchmark dataset: `uv run python prepare.py fetch --exchange binance --pair BTC/USDT:USDT --timeframe 1h --start 2020-01-01T00:00:00Z`
+6. Validate the dataset: `uv run python prepare.py validate --exchange binance --pair BTC/USDT:USDT --timeframe 1h`
+7. Run baseline: `uv run python strategy.py` and record the score
 
 ## Files
 - `prepare.py` — data pipeline + backtest engine + eval harness. IMMUTABLE. Read it to understand how your strategy is evaluated, but NEVER edit it.
@@ -18,14 +19,15 @@ You are an autonomous quant researcher. Your job: discover trading strategies th
 
 ## How evaluation works
 When you run `uv run python strategy.py`, it:
-1. Loads Binance BTC/USDT perp 1h OHLCV data (6+ years, Jan 2020 – present)
+1. Validates and loads the canonical Binance BTC/USDT perpetual 1h OHLCV dataset from January 1, 2020 to present
 2. Splits into walk-forward (85%) + validation holdout (15%)
-3. Runs 6-fold expanding-window walk-forward (180d min train, 45d test per fold)
+3. Runs 6-fold expanding-window walk-forward (180d initial train, 45d test per fold)
 4. For each fold: backtests on BOTH train and test data (for overfit detection)
 5. Computes per-fold: bar-return Sharpe, Sortino, Calmar, max drawdown, profit factor, trade count, win rate, exposure
 6. Checks hard gates (see below)
 7. If walk-forward passes: backtests on validation holdout
 8. Computes composite score and prints all metrics
+9. Refuses evaluation if the real dataset is missing, stale, corrupted, or too short for the canonical benchmark
 
 ## Metrics (what the eval prints)
 - `composite` — single optimization target (higher = better)
@@ -94,7 +96,7 @@ composite = (
 - If you're stuck after 5 failed experiments in a row, try a completely different approach.
 
 ## What the data covers
-6+ years of BTC 1h bars including:
+The canonical dataset is Binance `BTC/USDT:USDT` 1h bars from January 1, 2020 onward. Once `prepare.py validate` passes, it covers:
 - 2020: COVID crash + recovery
 - 2021: bull run to $69K
 - 2022: bear market (Luna crash, FTX collapse)
@@ -102,7 +104,7 @@ composite = (
 - 2024-25: ETF rally, new ATH
 - 2026: current market
 
-Your strategy must survive ALL of these regimes. A strategy that only works in bull markets will fail the fold variance gate.
+Do not trust any result until `uv run python prepare.py validate` passes. A strategy that only works in bull markets will fail the fold variance gate.
 
 ## Strategy ideas to explore
 - EMA/SMA crossovers with trend filters
