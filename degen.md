@@ -209,5 +209,5 @@ Judge ideas by these questions:
 - Is the rule simple enough to generalize?
 
 ## Current best
-best_composite: 0.743
-best_strategy: ema_20_50_hh_hl_lb8_v1
+best_composite: 0.846
+best_strategy: shadow_vol_synth_lb10_vol15_sz0-8
