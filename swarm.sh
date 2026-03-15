@@ -154,8 +154,8 @@ cmd_status() {
 
     local name=$(basename "$wt_dir")
     local role=$(cat "$wt_dir/.role" 2>/dev/null || echo "unknown")
-    local results=$(wc -l < "$wt_dir/results.tsv" 2>/dev/null || echo "0")
-    local passes=$(grep -c "PASS" "$wt_dir/results.tsv" 2>/dev/null || echo "0")
+    local results=$(wc -l < "$wt_dir/results.tsv" 2>/dev/null | tr -d ' ' || echo "0")
+    local passes=$(grep -c "PASS" "$wt_dir/results.tsv" 2>/dev/null | tr -d ' ' || echo "0")
     local best_composite=$(grep "PASS" "$wt_dir/results.tsv" 2>/dev/null | awk -F'\t' '{print $3}' | sort -rn | head -1)
 
     printf "  %-25s [%-14s] %3s iterations, %3s PASS" "$name" "$role" "$results" "$passes"

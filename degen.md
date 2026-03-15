@@ -209,5 +209,6 @@ Judge ideas by these questions:
 - Is the rule simple enough to generalize?
 
 ## Current best
-best_composite: 0.846
-best_strategy: shadow_vol_synth_lb10_vol15_sz0-8
+best_composite: 0.875
+best_strategy: shadow_asym_range_v1
+best_description: EMA 20/50 + asymmetric HH(8)/HL(10) + shadow filter(0.40) + bar-range tanh sizing(0.0-0.10) + trail(1.95%) + time exit(66 bars, cut if <1.5% gain). Key: range sizing > vol sizing, asymmetric structure lookbacks, time exit cuts losers not winners.
