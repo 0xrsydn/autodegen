@@ -1,138 +1,245 @@
 #!/usr/bin/env bash
-# autodegen swarm — git worktree lifecycle for parallel scout agents
+# autodegen swarm — git worktree lifecycle for role-based scout agents
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKTREE_BASE="$(dirname "$REPO_DIR")"
 DATA_DIR="$REPO_DIR/data"
 LEADERBOARD="$REPO_DIR/leaderboard.tsv"
+ROLES_DIR="$REPO_DIR/roles"
 
 usage() {
   cat <<EOF
 Usage: swarm.sh <command> [args]
 
 Commands:
-  setup <n>       Create n scout worktrees (e.g. swarm.sh setup 5)
-  cleanup         Remove all scout worktrees and branches
-  status          Show active worktrees
-  collect         Collect PASS strategies from all scouts into main repo
+  setup <name> <role>   Create a scout worktree with a role
+                        Roles: explorer, optimizer, synthesizer, stress-tester
+  setup-team            Create the standard 5-agent team
+  cleanup [name]        Remove scout worktree(s) (all if no name given)
+  status                Show active worktrees and their roles
+  collect               Collect PASS strategies from all scouts into main leaderboard
 
-Example:
-  ./swarm.sh setup 5    # create autodegen-scout-{1..5}
-  # ... run agents ...
-  ./swarm.sh collect    # harvest PASS results
-  ./swarm.sh cleanup    # tear down worktrees
+Examples:
+  ./swarm.sh setup-team                    # create the standard 5-agent team
+  ./swarm.sh setup explorer-1 explorer     # create a single explorer
+  ./swarm.sh collect                       # harvest PASS results
+  ./swarm.sh cleanup                       # tear down all worktrees
+
+Standard team:
+  explorer-1    (explorer)
+  explorer-2    (explorer)
+  optimizer-1   (optimizer)
+  synthesizer-1 (synthesizer)
+  stress-test-1 (stress-tester)
 EOF
 }
 
-cmd_setup() {
-  local n="${1:?Usage: swarm.sh setup <count>}"
-  echo "Setting up $n scout worktrees..."
+setup_scout() {
+  local name="${1:?Usage: swarm.sh setup <name> <role>}"
+  local role="${2:?Usage: swarm.sh setup <name> <role>}"
+  local role_file="$ROLES_DIR/${role}.md"
 
-  for i in $(seq 1 "$n"); do
-    local wt_dir="$WORKTREE_BASE/autodegen-scout-$i"
-    local branch="scout/$i"
+  if [[ ! -f "$role_file" ]]; then
+    echo "ERROR: Unknown role '$role'. Available: explorer, optimizer, synthesizer, stress-tester"
+    exit 1
+  fi
 
-    # Clean up if leftover from previous run
-    if git worktree list --porcelain | grep -q "$wt_dir"; then
-      echo "  Cleaning leftover worktree: scout-$i"
-      git worktree remove "$wt_dir" --force 2>/dev/null || true
-      git branch -D "$branch" 2>/dev/null || true
-    fi
+  local wt_dir="$WORKTREE_BASE/autodegen-${name}"
+  local branch="scout/${name}"
 
-    # Create worktree on a throwaway branch from HEAD
-    git worktree add "$wt_dir" -b "$branch" HEAD 2>/dev/null
-    
-    # Symlink shared data directory (read-only, all scouts share same data)
-    rm -rf "$wt_dir/data"
-    ln -sfn "$DATA_DIR" "$wt_dir/data"
-    
-    # Symlink leaderboard (shared across all scouts)
-    rm -f "$wt_dir/leaderboard.tsv"
-    ln -sfn "$LEADERBOARD" "$wt_dir/leaderboard.tsv"
-    
-    # Fresh results.tsv for this scout (don't inherit main's history)
-    : > "$wt_dir/results.tsv"
+  # Clean up if leftover from previous run
+  if git worktree list --porcelain | grep -q "$wt_dir"; then
+    echo "  Cleaning leftover worktree: $name"
+    git worktree remove "$wt_dir" --force 2>/dev/null || true
+    git branch -D "$branch" 2>/dev/null || true
+  fi
 
-    echo "  ✓ scout-$i ready at $wt_dir"
-  done
+  # Create worktree on a throwaway branch from HEAD
+  git worktree add "$wt_dir" -b "$branch" HEAD 2>/dev/null
+
+  # Symlink shared data directory
+  rm -rf "$wt_dir/data"
+  ln -sfn "$DATA_DIR" "$wt_dir/data"
+
+  # Symlink leaderboard (shared across all scouts)
+  rm -f "$wt_dir/leaderboard.tsv"
+  ln -sfn "$LEADERBOARD" "$wt_dir/leaderboard.tsv"
+
+  # Copy role-specific degen.md as the scout's main instruction file
+  cp "$role_file" "$wt_dir/degen.md"
+
+  # Record role for status display
+  echo "$role" > "$wt_dir/.role"
+
+  # Fresh results.tsv
+  : > "$wt_dir/results.tsv"
+
+  # Create empty BRIEFING.md (to be filled by orchestrator)
+  if [[ ! -f "$wt_dir/BRIEFING.md" ]]; then
+    echo "# BRIEFING — $name ($role)" > "$wt_dir/BRIEFING.md"
+    echo "" >> "$wt_dir/BRIEFING.md"
+    echo "Briefing not yet written. Wait for orchestrator to fill this." >> "$wt_dir/BRIEFING.md"
+  fi
+
+  # Create empty STRESS_REPORT.md for stress testers
+  if [[ "$role" == "stress-tester" ]]; then
+    : > "$wt_dir/STRESS_REPORT.md"
+  fi
+
+  echo "  ✓ ${name} (${role}) ready at $wt_dir"
+}
+
+cmd_setup_team() {
+  echo "Setting up standard 5-agent team..."
+
+  setup_scout "explorer-1" "explorer"
+  setup_scout "explorer-2" "explorer"
+  setup_scout "optimizer-1" "optimizer"
+  setup_scout "synthesizer-1" "synthesizer"
+  setup_scout "stress-test-1" "stress-tester"
 
   echo ""
-  echo "All $n scouts ready. Data symlinked, leaderboard shared."
-  echo "Scouts can git commit/revert independently."
+  echo "Team ready. Write BRIEFING.md for each scout before launching agents."
+  echo ""
+  echo "Worktree locations:"
+  for d in "$WORKTREE_BASE"/autodegen-{explorer-1,explorer-2,optimizer-1,synthesizer-1,stress-test-1}; do
+    if [[ -d "$d" ]]; then
+      local role=$(cat "$d/.role" 2>/dev/null || echo "unknown")
+      echo "  $(basename "$d") [$role]: $d"
+    fi
+  done
 }
 
 cmd_cleanup() {
+  local target="${1:-}"
   echo "Cleaning up scout worktrees..."
-  
+
   local count=0
-  for wt_dir in "$WORKTREE_BASE"/autodegen-scout-*; do
-    [ -d "$wt_dir" ] || continue
-    local i=$(basename "$wt_dir" | sed 's/autodegen-scout-//')
-    local branch="scout/$i"
-    
+  for wt_dir in "$WORKTREE_BASE"/autodegen-*; do
+    [[ -d "$wt_dir" ]] || continue
+    [[ "$wt_dir" == "$REPO_DIR" ]] && continue  # don't clean main repo
+
+    local name=$(basename "$wt_dir" | sed 's/autodegen-//')
+
+    # If a specific target was given, skip non-matches
+    if [[ -n "$target" && "$name" != "$target" ]]; then
+      continue
+    fi
+
+    local branch="scout/${name}"
+
     git worktree remove "$wt_dir" --force 2>/dev/null || rm -rf "$wt_dir"
     git branch -D "$branch" 2>/dev/null || true
-    
-    echo "  ✓ removed scout-$i"
+
+    echo "  ✓ removed $name"
     count=$((count + 1))
   done
 
-  # Prune stale worktree refs
-  git worktree prune
-  
-  echo "Cleaned up $count scout worktrees."
+  if [[ $count -eq 0 ]]; then
+    echo "  No scout worktrees found."
+  else
+    echo "  Removed $count worktree(s)."
+  fi
 }
 
 cmd_status() {
-  echo "Active worktrees:"
-  git worktree list
+  echo "Active scout worktrees:"
   echo ""
-  echo "Scout directories:"
-  ls -d "$WORKTREE_BASE"/autodegen-scout-* 2>/dev/null || echo "  (none)"
+
+  local found=0
+  for wt_dir in "$WORKTREE_BASE"/autodegen-*; do
+    [[ -d "$wt_dir" ]] || continue
+    [[ "$wt_dir" == "$REPO_DIR" ]] && continue
+
+    local name=$(basename "$wt_dir")
+    local role=$(cat "$wt_dir/.role" 2>/dev/null || echo "unknown")
+    local results=$(wc -l < "$wt_dir/results.tsv" 2>/dev/null || echo "0")
+    local passes=$(grep -c "PASS" "$wt_dir/results.tsv" 2>/dev/null || echo "0")
+    local best_composite=$(grep "PASS" "$wt_dir/results.tsv" 2>/dev/null | awk -F'\t' '{print $3}' | sort -rn | head -1)
+
+    printf "  %-25s [%-14s] %3s iterations, %3s PASS" "$name" "$role" "$results" "$passes"
+    if [[ -n "$best_composite" ]]; then
+      printf ", best: %s" "$best_composite"
+    fi
+    echo ""
+    found=1
+  done
+
+  if [[ $found -eq 0 ]]; then
+    echo "  No active scout worktrees."
+  fi
 }
 
 cmd_collect() {
   echo "Collecting PASS strategies from scouts..."
-  
+
   local collected=0
-  for wt_dir in "$WORKTREE_BASE"/autodegen-scout-*; do
-    [ -d "$wt_dir" ] || continue
-    local scout_name=$(basename "$wt_dir")
-    
-    # Check for PASS results in this scout's results.tsv
-    if [ -f "$wt_dir/results.tsv" ] && grep -q "PASS" "$wt_dir/results.tsv"; then
-      local pass_count=$(grep -c "PASS" "$wt_dir/results.tsv")
-      echo "  $scout_name: $pass_count PASS result(s)"
-      
-      # Copy the current strategy.py if it produced a PASS
+  for wt_dir in "$WORKTREE_BASE"/autodegen-*; do
+    [[ -d "$wt_dir" ]] || continue
+    [[ "$wt_dir" == "$REPO_DIR" ]] && continue
+
+    local name=$(basename "$wt_dir" | sed 's/autodegen-//')
+    local role=$(cat "$wt_dir/.role" 2>/dev/null || echo "unknown")
+
+    # Collect PASS results not already in leaderboard
+    if [[ -f "$wt_dir/results.tsv" ]]; then
+      local new=0
+      while IFS= read -r line; do
+        echo "$line" | grep -q "PASS" || continue
+        # Append with source tag
+        local tagged="${line}	${name}"
+        # Check if already in leaderboard (by name + composite)
+        local strat_name=$(echo "$line" | awk -F'\t' '{print $2}')
+        local composite=$(echo "$line" | awk -F'\t' '{print $3}')
+        if ! grep -qF "$strat_name	$composite" "$LEADERBOARD" 2>/dev/null; then
+          echo "$tagged" >> "$LEADERBOARD"
+          new=$((new + 1))
+        fi
+      done < "$wt_dir/results.tsv"
+      if [[ $new -gt 0 ]]; then
+        echo "  ✓ $name [$role]: collected $new new PASS result(s)"
+        collected=$((collected + new))
+      fi
+    fi
+
+    # Collect strategy files
+    if [[ -f "$wt_dir/strategy.py" ]]; then
       local ts=$(date +%s)
-      cp "$wt_dir/strategy.py" "$REPO_DIR/strategies/${scout_name}_${ts}.py" 2>/dev/null || {
-        mkdir -p "$REPO_DIR/strategies"
-        cp "$wt_dir/strategy.py" "$REPO_DIR/strategies/${scout_name}_${ts}.py"
-      }
-      
-      # Append PASS rows to main results.tsv (with source tag)
-      grep "PASS" "$wt_dir/results.tsv" | while IFS= read -r line; do
-        echo -e "${line}\t${scout_name}" >> "$LEADERBOARD"
-      done
-      
-      collected=$((collected + pass_count))
-    else
-      echo "  $scout_name: no PASS results"
+      cp "$wt_dir/strategy.py" "$REPO_DIR/strategies/${name}_${ts}.py"
+    fi
+
+    # Collect stress reports
+    if [[ "$role" == "stress-tester" && -f "$wt_dir/STRESS_REPORT.md" && -s "$wt_dir/STRESS_REPORT.md" ]]; then
+      cp "$wt_dir/STRESS_REPORT.md" "$REPO_DIR/STRESS_REPORT_${name}.md"
+      echo "  ✓ $name: collected stress report"
     fi
   done
-  
+
   echo ""
-  echo "Collected $collected PASS result(s) into leaderboard.tsv + strategies/"
+  echo "Total new results collected: $collected"
 }
 
-# Dispatch
-cd "$REPO_DIR"
+# --- Main ---
 case "${1:-}" in
-  setup)   cmd_setup "${2:-}" ;;
-  cleanup) cmd_cleanup ;;
-  status)  cmd_status ;;
-  collect) cmd_collect ;;
-  *)       usage ;;
+  setup)
+    shift
+    setup_scout "$@"
+    ;;
+  setup-team)
+    cmd_setup_team
+    ;;
+  cleanup)
+    shift
+    cmd_cleanup "${1:-}"
+    ;;
+  status)
+    cmd_status
+    ;;
+  collect)
+    cmd_collect
+    ;;
+  *)
+    usage
+    ;;
 esac
