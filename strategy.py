@@ -24,11 +24,11 @@ class Strategy:
         "range_lookback": 16,
         "size_min": 0.0,
         "size_max": 0.10,
-        "trail_base": 0.0195,
+        "trail_base": 0.019,
         "trail_tight": 0.010,
         "gain_threshold": 0.08,
         "momentum_mult": 18.0,
-        "struct_mult": 5.0,
+        "struct_mult": 0.0,
     }
 
     def initialize(self, train_data):
