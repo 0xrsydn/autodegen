@@ -17,15 +17,21 @@ import polars as pl
 Bar = namedtuple("Bar", ["timestamp", "open", "high", "low", "close", "volume"])
 REQUIRED_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
 EPS = 1e-12
-HOURS_PER_YEAR = 8760
 CANONICAL_EXCHANGE = "binance"
 CANONICAL_PAIR = "BTC/USDT:USDT"
 CANONICAL_TIMEFRAME = "1h"
 CANONICAL_START = datetime(2020, 1, 1, tzinfo=UTC)
 FRESHNESS_TOLERANCE = timedelta(hours=48)
-TARGET_TRAIN_HOURS = 180 * 24
-TARGET_TEST_HOURS = 45 * 24
-MIN_VALIDATION_HOURS = 90 * 24
+TF_SECONDS = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "4h": 14400,
+    "1d": 86400,
+}
+MAX_PARAMS = 12
 
 
 class DataQualityError(ValueError):
@@ -111,9 +117,33 @@ def _parse_start(start: str | None) -> datetime:
     return _as_utc(parsed)
 
 
-def _required_total_bars(n_folds: int = 6, validation_pct: float = 0.15) -> int:
-    wf_hours = TARGET_TRAIN_HOURS + (n_folds * TARGET_TEST_HOURS)
-    return math.ceil(wf_hours / (1.0 - validation_pct))
+def _timeframe_seconds(timeframe: str) -> int:
+    secs = TF_SECONDS.get(timeframe)
+    if secs is None:
+        raise ValueError(f"unsupported timeframe: {timeframe}")
+    return secs
+
+
+def bars_per_year(timeframe: str) -> int:
+    """Number of bars in a year for a given timeframe."""
+    return int(365.25 * 24 * 3600 / _timeframe_seconds(timeframe))
+
+
+def target_train_bars(timeframe: str) -> int:
+    return int(180 * 24 * 3600 / _timeframe_seconds(timeframe))
+
+
+def target_test_bars(timeframe: str) -> int:
+    return int(45 * 24 * 3600 / _timeframe_seconds(timeframe))
+
+
+def min_validation_bars(timeframe: str) -> int:
+    return int(90 * 24 * 3600 / _timeframe_seconds(timeframe))
+
+
+def _required_total_bars(timeframe: str, n_folds: int = 6, validation_pct: float = 0.15) -> int:
+    wf_bars = target_train_bars(timeframe) + (n_folds * target_test_bars(timeframe))
+    return math.ceil(wf_bars / (1.0 - validation_pct))
 
 
 def _load_time_bounds(target: Path) -> tuple[datetime | None, datetime | None]:
@@ -162,24 +192,23 @@ def summarize_dataset(
     n_folds: int = 6,
     validation_pct: float = 0.15,
 ) -> DatasetSummary:
-    if timeframe != CANONICAL_TIMEFRAME:
-        raise DataQualityError(f"unsupported timeframe for benchmark validation: {timeframe}")
-
     pair = _normalize_pair(exchange, pair)
-    df = load_ohlcv(data_dir=data_dir, exchange=exchange, pair=pair)
+    df = load_ohlcv(data_dir=data_dir, exchange=exchange, pair=pair, timeframe=timeframe)
     timestamps = df["timestamp"].to_list() if len(df) > 0 else []
 
+    expected_delta = timedelta(seconds=_timeframe_seconds(timeframe))
     for prev, curr in zip(timestamps, timestamps[1:]):
         delta = curr - prev
-        if delta != timedelta(hours=1):
+        if delta != expected_delta:
             raise DataQualityError(
-                f"timestamp gap detected: {_as_utc(prev).isoformat()} -> {_as_utc(curr).isoformat()} ({delta.total_seconds() / 3600:.1f}h)"
+                f"timestamp gap detected: {_as_utc(prev).isoformat()} -> {_as_utc(curr).isoformat()} ({delta})"
             )
 
     first_bar = _as_utc(timestamps[0]) if timestamps else None
     last_bar = _as_utc(timestamps[-1]) if timestamps else None
     bar_count = len(df)
-    required_bars = _required_total_bars(n_folds=n_folds, validation_pct=validation_pct)
+    required_bars = _required_total_bars(timeframe=timeframe, n_folds=n_folds, validation_pct=validation_pct)
+    bars_per_day = 86400 / _timeframe_seconds(timeframe)
 
     return DatasetSummary(
         exchange=exchange,
@@ -188,7 +217,7 @@ def summarize_dataset(
         first_bar=first_bar,
         last_bar=last_bar,
         bar_count=bar_count,
-        total_days=bar_count / 24.0,
+        total_days=bar_count / bars_per_day,
         required_bars=required_bars,
         full_wf_ready=bar_count >= required_bars,
     )
@@ -334,8 +363,9 @@ def load_bars(
     data_dir: str = "data",
     exchange: str = CANONICAL_EXCHANGE,
     pair: str = CANONICAL_PAIR,
+    timeframe: str = CANONICAL_TIMEFRAME,
 ) -> list[Bar]:
-    df = load_ohlcv(data_dir=data_dir, exchange=exchange, pair=pair)
+    df = load_ohlcv(data_dir=data_dir, exchange=exchange, pair=pair, timeframe=timeframe)
     return [Bar(*row) for row in df.select(REQUIRED_COLUMNS).iter_rows()]
 
 
@@ -454,7 +484,7 @@ def _bar_returns(result: BacktestResult) -> list[float]:
     return rets
 
 
-def bar_return_sharpe(result: BacktestResult) -> float:
+def bar_return_sharpe(result: BacktestResult, timeframe: str = CANONICAL_TIMEFRAME) -> float:
     rets = _bar_returns(result)
     if len(rets) < 2:
         return 0.0
@@ -463,10 +493,10 @@ def bar_return_sharpe(result: BacktestResult) -> float:
     std = math.sqrt(max(var, 0.0))
     if std < EPS:
         return 0.0
-    return (mean_r / std) * math.sqrt(HOURS_PER_YEAR)
+    return (mean_r / std) * math.sqrt(bars_per_year(timeframe))
 
 
-def sortino(result: BacktestResult) -> float:
+def sortino(result: BacktestResult, timeframe: str = CANONICAL_TIMEFRAME) -> float:
     rets = _bar_returns(result)
     if len(rets) < 2:
         return 0.0
@@ -477,7 +507,7 @@ def sortino(result: BacktestResult) -> float:
     dd = math.sqrt(sum(r * r for r in downside) / len(downside))
     if dd < EPS:
         return 0.0
-    return (mean_r / dd) * math.sqrt(HOURS_PER_YEAR)
+    return (mean_r / dd) * math.sqrt(bars_per_year(timeframe))
 
 
 def max_drawdown(equity_curve: list[float]) -> float:
@@ -549,11 +579,11 @@ def closed_trades(result: BacktestResult) -> int:
     return len([f for f in result.fills if f.get("is_close")])
 
 
-def summarize_result(result: BacktestResult) -> dict[str, float]:
+def summarize_result(result: BacktestResult, timeframe: str = CANONICAL_TIMEFRAME) -> dict[str, float]:
     return {
-        "bar_sharpe": bar_return_sharpe(result),
+        "bar_sharpe": bar_return_sharpe(result, timeframe=timeframe),
         "trade_sharpe": trade_return_sharpe(result),
-        "sortino": sortino(result),
+        "sortino": sortino(result, timeframe=timeframe),
         "calmar": calmar(result),
         "profit_factor": profit_factor(result),
         "win_rate": win_rate(result),
@@ -563,29 +593,36 @@ def summarize_result(result: BacktestResult) -> dict[str, float]:
     }
 
 
-def walk_forward_splits(bars: list[Bar], n_folds: int = 6) -> list[tuple[list[Bar], list[Bar]]]:
+def walk_forward_splits(
+    bars: list[Bar],
+    n_folds: int = 6,
+    timeframe: str = CANONICAL_TIMEFRAME,
+) -> list[tuple[list[Bar], list[Bar]]]:
     if len(bars) < n_folds + 2:
         return []
 
-    target_train = TARGET_TRAIN_HOURS
-    target_test = TARGET_TEST_HOURS
+    target_train = target_train_bars(timeframe)
+    target_test = target_test_bars(timeframe)
     target_total = target_train + (n_folds * target_test)
+    bars_per_day = 86400 / _timeframe_seconds(timeframe)
 
     if len(bars) < target_total:
         raise DataQualityError(
-            f"insufficient walk-forward history: need {target_total} bars ({target_total / 24:.1f}d), got {len(bars)} bars ({len(bars) / 24:.1f}d)"
+            f"insufficient walk-forward history: need {target_total} bars ({target_total / bars_per_day:.1f}d), got {len(bars)} bars ({len(bars) / bars_per_day:.1f}d)"
         )
 
     train_size = target_train
     test_size = target_test
+    available = len(bars) - train_size
+    step = max(test_size, (available - test_size) // max(n_folds - 1, 1))
 
     splits: list[tuple[list[Bar], list[Bar]]] = []
     for i in range(n_folds):
-        train_end = train_size + i * test_size
-        test_end = train_end + test_size
+        test_start = train_size + i * step
+        test_end = test_start + test_size
         if test_end > len(bars):
             break
-        splits.append((bars[:train_end], bars[train_end:test_end]))
+        splits.append((bars[:test_start], bars[test_start:test_end]))
 
     return splits
 
@@ -602,15 +639,17 @@ def composite_score(
     wf_profit_factor: float,
     negative_fold_ratio: float,
     holdout_decay: float,
+    fold_regime_gap: float,
 ) -> float:
     return (
-        0.35 * _clip(wf_bar_sharpe / 3.0, 0.0, 1.0)
+        0.30 * _clip(wf_bar_sharpe / 3.0, 0.0, 1.0)
         + 0.10 * _clip(val_bar_sharpe / 2.0, 0.0, 1.0)
-        + 0.15 * _clip(wf_sortino / 5.0, 0.0, 1.0)
-        + 0.15 * _clip(wf_calmar / 3.0, 0.0, 1.0)
+        + 0.10 * _clip(wf_sortino / 5.0, 0.0, 1.0)
+        + 0.10 * _clip(wf_calmar / 3.0, 0.0, 1.0)
         + 0.10 * _clip((wf_profit_factor - 1.0) / 2.0, 0.0, 1.0)
         + 0.10 * (1.0 - negative_fold_ratio)
-        + 0.05 * min(holdout_decay, 1.0)
+        + 0.10 * min(holdout_decay, 1.0)
+        + 0.10 * _clip(1.0 - fold_regime_gap, 0.0, 1.0)
     )
 
 
@@ -641,7 +680,13 @@ def _append_result_row(path: Path, row: dict[str, str]) -> None:
         w.writerow([row[k] for k in header])
 
 
-def evaluate(strategy_cls, bars: list[Bar], n_folds: int = 6, validation_pct: float = 0.15):
+def evaluate(
+    strategy_cls,
+    bars: list[Bar],
+    n_folds: int = 6,
+    validation_pct: float = 0.15,
+    timeframe: str = CANONICAL_TIMEFRAME,
+):
     if len(bars) < 100:
         raise DataQualityError("not enough real bars for evaluation")
 
@@ -649,21 +694,23 @@ def evaluate(strategy_cls, bars: list[Bar], n_folds: int = 6, validation_pct: fl
     wf_bars = bars[:cut]
     val_bars = bars[cut:]
 
-    if len(val_bars) < MIN_VALIDATION_HOURS:
-        raise DataQualityError(f"validation segment shorter than 90 days ({len(val_bars) / 24:.1f}d)")
+    min_val_bars = min_validation_bars(timeframe)
+    bars_per_day = 86400 / _timeframe_seconds(timeframe)
+    if len(val_bars) < min_val_bars:
+        raise DataQualityError(f"validation segment shorter than 90 days ({len(val_bars) / bars_per_day:.1f}d)")
 
-    folds = walk_forward_splits(wf_bars, n_folds=n_folds)
+    folds = walk_forward_splits(wf_bars, n_folds=n_folds, timeframe=timeframe)
 
     train_metrics: list[dict[str, float]] = []
     test_metrics: list[dict[str, float]] = []
     for train, test in folds:
         train_bt = run_backtest(strategy_cls(), train)
         test_bt = run_backtest(strategy_cls(), test)
-        train_metrics.append(summarize_result(train_bt))
-        test_metrics.append(summarize_result(test_bt))
+        train_metrics.append(summarize_result(train_bt, timeframe=timeframe))
+        test_metrics.append(summarize_result(test_bt, timeframe=timeframe))
 
     val_bt = run_backtest(strategy_cls(), val_bars) if val_bars else BacktestResult([], [], [], 10000.0, 0.0, 0.0)
-    val = summarize_result(val_bt)
+    val = summarize_result(val_bt, timeframe=timeframe)
 
     wf_bar_sharpe = fmean(m["bar_sharpe"] for m in test_metrics) if test_metrics else 0.0
     wf_sortino = fmean(m["sortino"] for m in test_metrics) if test_metrics else 0.0
@@ -681,6 +728,7 @@ def evaluate(strategy_cls, bars: list[Bar], n_folds: int = 6, validation_pct: fl
     fold_regime_gap = fmean((tr - te) for tr, te in zip(train_sharpes, test_sharpes)) if test_sharpes else 0.0
     fold_std = (pl.Series(test_sharpes).std(ddof=1) if len(test_sharpes) > 1 else 0.0) or 0.0
     negative_fold_ratio = (sum(1 for s in test_sharpes if s < 0) / len(test_sharpes)) if test_sharpes else 1.0
+    n_params = len(getattr(strategy_cls, "parameters", {}))
 
     gates_pass = all(
         [
@@ -688,6 +736,7 @@ def evaluate(strategy_cls, bars: list[Bar], n_folds: int = 6, validation_pct: fl
             avg_trades_per_fold >= 5,
             wf_bar_sharpe >= 0.75,
             val["bar_sharpe"] >= 0.25,
+            val["trades"] >= 5,
             wf_maxdd <= 0.25,
             val["maxdd"] <= 0.30,
             worst_fold_maxdd <= 0.35,
@@ -696,6 +745,7 @@ def evaluate(strategy_cls, bars: list[Bar], n_folds: int = 6, validation_pct: fl
             fold_regime_gap <= 0.75,
             fold_std <= 1.25,
             negative_fold_ratio <= 0.30,
+            n_params <= MAX_PARAMS,
         ]
     )
 
@@ -707,6 +757,7 @@ def evaluate(strategy_cls, bars: list[Bar], n_folds: int = 6, validation_pct: fl
         wf_profit_factor=wf_profit_factor,
         negative_fold_ratio=negative_fold_ratio,
         holdout_decay=holdout_decay,
+        fold_regime_gap=fold_regime_gap,
     )
 
     metrics = {
@@ -774,7 +825,7 @@ def evaluate(strategy_cls, bars: list[Bar], n_folds: int = 6, validation_pct: fl
             "neg_folds": f"{negative_fold_ratio:.6f}",
             "profit_factor": f"{wf_profit_factor:.6f}",
             "calmar": f"{wf_calmar:.6f}",
-            "n_params": str(len(getattr(strategy_cls, "parameters", {}))),
+            "n_params": str(n_params),
             "status": "PASS" if gates_pass else "FAIL",
         },
     )
@@ -818,8 +869,8 @@ if __name__ == "__main__":
             print_dataset_summary(summary)
             from strategy import Strategy
 
-            bars = load_bars(exchange=args.exchange, pair=args.pair)
-            evaluate(Strategy, bars)
+            bars = load_bars(exchange=args.exchange, pair=args.pair, timeframe=args.timeframe)
+            evaluate(Strategy, bars, timeframe=args.timeframe)
         else:
             parser.print_help()
     except DataQualityError as exc:
