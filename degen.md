@@ -4,8 +4,8 @@ You are an autonomous quant researcher. Your job: discover trading strategies th
 
 ## Setup (run once at start)
 1. Read this file completely
-2. Read `prepare.py` — this is the immutable oracle. DO NOT EDIT IT.
-3. Read `strategy.py` — this is the ONLY file you edit
+2. Read `prepare.py` — this is the evaluation oracle. Read it carefully before changing anything.
+3. Read `strategy.py` — this is usually the file you edit for strategy work
 4. Read `leaderboard.tsv` (if it exists) — best strategies across all agents. This is your benchmark to beat.
 5. Read `results.tsv` (if it exists) — your local experiment history
 6. Fetch the canonical benchmark dataset: `uv run python prepare.py fetch --exchange binance --pair BTC/USDT:USDT --timeframe 1h --start 2020-01-01T00:00:00Z`
@@ -21,10 +21,11 @@ You are an autonomous quant researcher. Your job: discover trading strategies th
 
 ## How evaluation works
 When you run `uv run python strategy.py`, it:
-1. Validates and loads the canonical Binance BTC/USDT perpetual 1h OHLCV dataset from January 1, 2020 to present
+1. Validates and loads the canonical Binance BTC/USDT perpetual OHLCV dataset from January 1, 2020 to present (default `1h`, but timeframe-aware)
 2. Splits into walk-forward (85%) + validation holdout (15%)
-3. Runs 6-fold expanding-window walk-forward (180d initial train, 45d test per fold)
-4. For each fold: backtests on BOTH train and test data (for overfit detection)
+3. Runs 6-fold walk-forward using timeframe-aware windows (`target_train_bars(timeframe)` = 180 days, `target_test_bars(timeframe)` = 45 days)
+4. Uses expanding train windows and evenly distributes test windows across the full walk-forward segment
+5. For each fold: backtests on BOTH train and test data (for overfit detection)
 5. Computes per-fold: bar-return Sharpe, Sortino, Calmar, max drawdown, profit factor, trade count, win rate, exposure
 6. Checks hard gates (see below)
 7. If walk-forward passes: backtests on validation holdout
@@ -33,7 +34,7 @@ When you run `uv run python strategy.py`, it:
 
 ## Metrics (what the eval prints)
 - `composite` — single optimization target (higher = better)
-- `bar_sharpe_wf` — mean bar-return Sharpe across WF folds (annualized, sqrt(8760))
+- `bar_sharpe_wf` — mean bar-return Sharpe across WF folds (annualized with `sqrt(bars_per_year(timeframe))`; e.g. 1h = 8766, 15m = 35064)
 - `bar_sharpe_val` — bar-return Sharpe on validation holdout
 - `decay` — val_sharpe / wf_sharpe (overfit detector, 1.0 = perfect, <0.5 = likely overfit)
 - `fold_regime_gap` — mean(train_sharpe - test_sharpe) per fold; measures earlier-era vs later-era performance drift inside each WF split
@@ -48,30 +49,32 @@ When you run `uv run python strategy.py`, it:
 - `exposure_wf` — fraction of time in a position
 
 ## Hard gates (ALL must pass)
+- `total WF trades >= 30`
+- `avg trades per fold >= 5`
 - `bar_sharpe_wf >= 0.75`
 - `bar_sharpe_val >= 0.25`
+- `validation trades >= 5`
 - `maxdd_wf <= 0.25` (25%)
 - `maxdd_val <= 0.30` (30%)
 - `worst_fold_maxdd <= 0.35` (35%)
 - `profit_factor_wf >= 1.10`
-- `total WF trades >= 30`
-- `avg trades per fold >= 5`
-- `validation trades >= 5`
+- `decay >= 0.50`
+- `fold_regime_gap <= 0.75`
 - `fold_std <= 1.25`
 - `negative_fold_ratio <= 0.30`
-- `fold_regime_gap <= 0.75`
-- `decay >= 0.50`
+- `n_params <= 12`
 
 ## Composite score formula
 ```
 composite = (
-    0.35 * clip(bar_sharpe_wf / 3.0, 0, 1)
+    0.30 * clip(bar_sharpe_wf / 3.0, 0, 1)
   + 0.10 * clip(bar_sharpe_val / 2.0, 0, 1)
-  + 0.15 * clip(sortino_wf / 5.0, 0, 1)
-  + 0.15 * clip(calmar_wf / 3.0, 0, 1)
+  + 0.10 * clip(sortino_wf / 5.0, 0, 1)
+  + 0.10 * clip(calmar_wf / 3.0, 0, 1)
   + 0.10 * clip((profit_factor_wf - 1.0) / 2.0, 0, 1)
   + 0.10 * (1 - negative_fold_ratio)
-  + 0.05 * min(decay, 1.0)
+  + 0.10 * min(decay, 1.0)
+  + 0.10 * clip(1 - fold_regime_gap, 0, 1)
 )
 ```
 
@@ -92,7 +95,7 @@ composite = (
 7. **NEVER STOP.** Go back to step 1.
 
 ## Constraints
-- Edit ONLY `strategy.py`. Never touch `prepare.py`.
+- For strategy search, edit `strategy.py` unless you are explicitly fixing the harness itself.
 - `strategy.parameters` must contain ALL tunable values (no hardcoded magic numbers in methods)
 - Strategy must work on 1h bars. No sub-hour features.
 - Keep it simple. A strategy with 3 parameters that works > a strategy with 15 parameters that barely works.

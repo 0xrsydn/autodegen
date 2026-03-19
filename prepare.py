@@ -397,7 +397,6 @@ def run_backtest(
     strategy,
     bars: list[Bar],
     initial_cash: float = 10000,
-    maker_fee: float = 0.0002,
     taker_fee: float = 0.0005,
     slippage_factor: float = 0.1,
 ) -> BacktestResult:
@@ -408,6 +407,7 @@ def run_backtest(
     cash = float(initial_cash)
     position = 0.0
     avg_entry = 0.0
+    avg_entry_fee_per_unit = 0.0
     equity_curve: list[float] = []
     position_history: list[float] = []
     fills: list[dict] = []
@@ -426,24 +426,36 @@ def run_backtest(
             prev_abs = abs(prev_position)
             prev_sign = 1.0 if prev_position > 0 else (-1.0 if prev_position < 0 else 0.0)
             close_qty = min(prev_abs, abs(qty)) if prev_sign != 0 and prev_sign != (1.0 if qty > 0 else -1.0) else 0.0
+            old_avg_entry = avg_entry
+            old_avg_entry_fee_per_unit = avg_entry_fee_per_unit
             pnl = 0.0
 
             if close_qty > 0:
-                if prev_sign > 0:
-                    pnl = (price - avg_entry) * close_qty
-                else:
-                    pnl = (avg_entry - price) * close_qty
+                gross_pnl = (price - old_avg_entry) * close_qty if prev_sign > 0 else (old_avg_entry - price) * close_qty
+                entry_fees = close_qty * old_avg_entry_fee_per_unit
+                exit_fees = fee * (close_qty / max(abs(qty), EPS))
+                pnl = gross_pnl - entry_fees - exit_fees
 
             position = prev_position + qty
 
             if abs(position) < EPS:
                 position = 0.0
                 avg_entry = 0.0
+                avg_entry_fee_per_unit = 0.0
             elif prev_position == 0 or (prev_sign == (1.0 if qty > 0 else -1.0)):
                 new_abs = abs(position)
-                avg_entry = ((avg_entry * prev_abs) + (price * abs(qty))) / max(new_abs, EPS)
+                avg_entry = ((old_avg_entry * prev_abs) + (price * abs(qty))) / max(new_abs, EPS)
+                total_entry_fees = (old_avg_entry_fee_per_unit * prev_abs) + fee
+                avg_entry_fee_per_unit = total_entry_fees / max(new_abs, EPS)
             elif (prev_position > 0 > position) or (prev_position < 0 < position):
+                opening_qty = abs(position)
+                opening_fee = max(fee - (fee * (close_qty / max(abs(qty), EPS))), 0.0)
                 avg_entry = price
+                avg_entry_fee_per_unit = opening_fee / max(opening_qty, EPS)
+            else:
+                remaining_abs = abs(position)
+                remaining_entry_fees = max((old_avg_entry_fee_per_unit * prev_abs) - (close_qty * old_avg_entry_fee_per_unit), 0.0)
+                avg_entry_fee_per_unit = remaining_entry_fees / max(remaining_abs, EPS)
 
             fills.append(
                 {
@@ -453,7 +465,7 @@ def run_backtest(
                     "price": price,
                     "fee": fee,
                     "pnl": pnl,
-                    "entry_value": close_qty * avg_entry if close_qty > 0 else 0.0,
+                    "entry_value": close_qty * old_avg_entry if close_qty > 0 else 0.0,
                     "is_close": close_qty > 0,
                 }
             )
