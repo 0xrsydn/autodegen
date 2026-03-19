@@ -8,9 +8,11 @@ You are an autonomous quant researcher. Your job: discover trading strategies th
 3. Read `strategy.py` — this is usually the file you edit for strategy work
 4. Read `leaderboard.tsv` (if it exists) — best strategies across all agents. This is your benchmark to beat.
 5. Read `results.tsv` (if it exists) — your local experiment history
-6. Fetch the canonical benchmark dataset: `uv run python prepare.py fetch --exchange binance --pair BTC/USDT:USDT --timeframe 1h --start 2020-01-01T00:00:00Z`
-7. Validate the dataset: `uv run python prepare.py validate --exchange binance --pair BTC/USDT:USDT --timeframe 1h`
-8. Run baseline: `uv run python strategy.py` and record the score
+6. Fetch the benchmark dataset: `CCXT_PROXY=socks5h://127.0.0.1:1080 uv run python prepare.py fetch --exchange binance --pair BTC/USDT:USDT --timeframe 15m --start 2020-01-01T00:00:00Z`
+   - The CCXT_PROXY is required (Binance blocked in Indonesia). If fetch fails with connection error, ensure the SOCKS tunnel is up: `ssh -f -N -D 1080 root@greencloud-vps`
+   - If 15m data already exists in `data/binance/BTC-USDT-USDT/15m/`, skip this step
+7. Run baseline: `uv run python strategy.py` and record the score
+   - strategy.py has `TIMEFRAME = "15m"` set — do NOT change this
 
 ## Files
 - `prepare.py` — data pipeline + backtest engine + eval harness. IMMUTABLE. Read it to understand how your strategy is evaluated, but NEVER edit it.
@@ -212,6 +214,6 @@ Judge ideas by these questions:
 - Is the rule simple enough to generalize?
 
 ## Current best
-best_composite: 0.875
-best_strategy: shadow_asym_range_v1
-best_description: EMA 20/50 + asymmetric HH(8)/HL(10) + shadow filter(0.40) + bar-range tanh sizing(0.0-0.10) + trail(1.95%) + time exit(66 bars, cut if <1.5% gain). Key: range sizing > vol sizing, asymmetric structure lookbacks, time exit cuts losers not winners.
+best_composite: 0.000
+best_strategy: none
+best_description: Fresh start on 15m timeframe with corrected walk-forward harness. No valid results yet.
