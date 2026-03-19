@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import time
 from collections import namedtuple
 from dataclasses import dataclass
@@ -83,8 +84,11 @@ def validate_ohlcv(df: pl.DataFrame) -> None:
         raise DataQualityError("negative volume detected")
 
 
-def _target_dir(data_dir: str, exchange: str, pair: str) -> Path:
-    return Path(data_dir) / exchange / pair.replace("/", "-").replace(":", "-")
+def _target_dir(data_dir: str, exchange: str, pair: str, timeframe: str | None = None) -> Path:
+    base = Path(data_dir) / exchange / pair.replace("/", "-").replace(":", "-")
+    if timeframe and timeframe != CANONICAL_TIMEFRAME:
+        return base / timeframe
+    return base
 
 
 def _normalize_pair(exchange: str, pair: str) -> str:
@@ -137,9 +141,10 @@ def load_ohlcv(
     data_dir: str = "data",
     exchange: str = CANONICAL_EXCHANGE,
     pair: str = CANONICAL_PAIR,
+    timeframe: str = CANONICAL_TIMEFRAME,
 ) -> pl.DataFrame:
     pair = _normalize_pair(exchange, pair)
-    target = _target_dir(data_dir, exchange, pair)
+    target = _target_dir(data_dir, exchange, pair, timeframe)
     files = sorted(target.glob("*.parquet"))
     if not files:
         return pl.DataFrame({c: [] for c in REQUIRED_COLUMNS})
@@ -252,8 +257,13 @@ def fetch_data(
     pair = _normalize_pair(exchange, pair)
     start_dt = _parse_start(start)
 
-    ex = getattr(ccxt, exchange)({"enableRateLimit": True})
-    target = _target_dir(data_dir, exchange, pair)
+    _ccxt_opts: dict = {"enableRateLimit": True}
+    # Support SOCKS proxy via env var (e.g. for regions where Binance is blocked)
+    _proxy = os.environ.get("CCXT_PROXY")
+    if _proxy:
+        _ccxt_opts["proxies"] = {"http": _proxy, "https": _proxy}
+    ex = getattr(ccxt, exchange)(_ccxt_opts)
+    target = _target_dir(data_dir, exchange, pair, timeframe)
     target.mkdir(parents=True, exist_ok=True)
 
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
